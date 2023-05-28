@@ -9,7 +9,7 @@ import re
 #3. Run this script to create the search template. The script will remove properties that are outside of the subscription area, too close to the border, or flagged by NIC as preventing the analysis from running.
 
 #Omni Steps:
-#1. Run analysis using the Omni Major Market Centers file in the Data folder for 50 mile radius.
+#1. Run analysis using the Omni Major Market Centers file in the Data folder for 20 mile radius.
 #2. Run comp report in NIC, this will provide the list of individual properties to search for each market. Download the file to the Data folder as Omni Major Market Comps.csv
 #3. Run this script to create the search templates for each market. The script will create multiple templates if the number of properties exceeds 5000.
 
@@ -80,27 +80,87 @@ print('Arrow search template created successfully.')
 #Omni Properties
 print('Preparing Omni search template')
 file_path = os.path.join(os.getcwd(), 'Data', 'Omni Major Market Comps.csv')
-df = pd.read_csv(file_path, usecols=['Id', 'Name', 'Address', 'City', 'State', 'Zip', 'Latitude', 'Longitude'])
+df = pd.read_csv(file_path, usecols=['FacilityName', 'Id', 'Name', 'Address', 'City', 'State', 'Zip', 'Latitude.1', 'Longitude.1', 'ALExistingBeds', 'ILExistingBeds', 'MCExistingBeds'])
 df = df.rename(columns={    'Id': 'ID (Optional)',
                             'Name': 'Facility Name',
                             'Address': 'Street Address',
                             'Zip': 'Zip Code',
-                            'Latitude': 'Lat (Optional)',
-                            'Longitude': 'Long (Optional)'})
+                            'Latitude.1': 'Lat (Optional)',
+                            'Longitude.1': 'Long (Optional)'})
 
 df = df.drop_duplicates(subset=['Facility Name', 'Street Address'])
-rows = df.shape[0]
-chunksize = 2500
-more_chunks = True
-i = 1
-while more_chunks:
-    chunk_df = df.iloc[:chunksize]
-    print(chunk_df.shape[0])
-    df = df.iloc[chunksize:]
-    rows = df.shape[0]
-    if rows == 0:
-        more_chunks = False
-    file_path = os.path.join(os.getcwd(), 'Output', f'OmniSearchTemplate{i}.xlsx')
-    chunk_df.to_excel(file_path, index=False)
-    i += 1
-print(f' {i-1} Omni Search Template(s) created successfully.')
+df['Total Inventory'] = df['ALExistingBeds'] + df['ILExistingBeds'] + df['MCExistingBeds']
+df = df.sort_values(by=['Total Inventory'], ascending=False)
+df = df.drop(columns=['Total Inventory', 'ALExistingBeds', 'ILExistingBeds', 'MCExistingBeds'])
+export_df = pd.DataFrame()
+
+df['FacilityName'] = df['FacilityName'].str.split(',').str[1].str.strip()
+df = df.drop_duplicates(subset=['FacilityName', 'Facility Name', 'Street Address'])
+
+continue_export = True
+pass_count = 1
+while continue_export:
+    print(f'Pass {pass_count}')
+    pass_df = pd.DataFrame()
+    drop_list = []
+    distance_threshold = 10.5
+    market_areas = df['FacilityName'].unique().tolist()
+    for market in market_areas:
+        print(f'Trimming communities in close proximity for {market}')
+        market_df = df[df['FacilityName'] == market]
+        for index, row in market_df.iterrows():
+            site = row['ID (Optional)']
+            if site in drop_list:
+                continue
+            else:
+                site_lat = row['Lat (Optional)']
+                site_lon = row['Long (Optional)']
+                search_df = market_df.copy()
+                if search_df.shape[0] > 1:
+                    search_df = search_df[search_df['ID (Optional)'] != site]
+                    search_df['Distance'] = search_df.apply(lambda x: distance.distance((x['Lat (Optional)'],x['Long (Optional)']),(site_lat, site_lon)).miles, axis=1)
+                    drop_sites = search_df[search_df['Distance'] <= distance_threshold]['ID (Optional)'].unique().tolist()
+                    drop_list += drop_sites
+
+                    if len(drop_sites) > 0:
+                        print(f'Found {len(drop_sites)} sites within {distance_threshold} mile of {site}')
+
+                site_df = pd.DataFrame({    'ID (Optional)': [site], 
+                                            'Facility Name': [row['Facility Name']], 
+                                            'Street Address': [row['Street Address']],
+                                            'City': [row['City']],
+                                            'State': [row['State']],
+                                            'Lat (Optional)': [site_lat], 
+                                            'Long (Optional)': [site_lon]})
+
+                export_df = pd.concat([export_df, site_df])
+                pass_df = pd.concat([pass_df, site_df])
+
+    print('Starting last check across import for sites within radius')
+    drop_list = []
+    for index, row in pass_df.iterrows():
+        site = row['ID (Optional)']
+        if site in drop_list:
+            continue
+        else:
+            lat = row['Lat (Optional)']
+            lon = row['Long (Optional)']
+            pass_df['Distance'] = pass_df.apply(lambda x: distance.distance((x['Lat (Optional)'],x['Long (Optional)']),(lat, lon)).miles, axis=1)
+            drop_sites = pass_df[(pass_df['Distance'] <= distance_threshold) & (pass_df['ID (Optional)'] != site)]['ID (Optional)'].unique().tolist()
+            if len(drop_sites) > 0:
+                print(f'Found {len(drop_sites)} sites within {distance_threshold} mile of {site}')
+            drop_list += drop_sites
+
+    pass_df = pass_df[~pass_df['ID (Optional)'].isin(drop_list)]
+    export_df = export_df[~export_df['ID (Optional)'].isin(drop_list)]
+    if len(drop_list) > 0:
+        print(f'Dropped {len(drop_list)} sites within radius from import')
+
+    file_path = os.path.join(os.getcwd(), 'Output', f'OmniSearchTemplate{pass_count}.xlsx')
+    pass_df.to_excel(file_path, index=False)
+    print(f'Pass {pass_count} Omni Search Template created successfully with {pass_df.shape[0]} sites.')
+
+    df = df[~df['ID (Optional)'].isin(export_df['ID (Optional)'].tolist())]
+    pass_count += 1
+    if df.shape[0] == 0 or pass_count > 15:
+        continue_export = False
